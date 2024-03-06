@@ -1,0 +1,75 @@
+---
+title: "Fitting a Simple Spatial ILM to Data <br> (SIR Version)"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+# Simple Spatial SIR ILM
+
+```{r}
+library(EpiILM)
+```
+
+
+
+
+# Read in data
+
+```{r, include=TRUE}
+dat_sir = read.table('DATA/ENAR_SIR_fit.csv',header=T, sep=',')
+dat_sir
+```
+
+# Form epidata object for analysis
+
+```{r, include=TRUE}
+epidat =as.epidata(type = "SIR", n = 100, x=dat_sir$x, y = dat_sir$y, inftime = dat_sir$inftime, infperiod = dat_sir$removal - dat_sir$inftime)
+epidat
+```
+
+
+# Epidemic Plots 
+
+
+```{r}
+plot(epidat, plottype = "curve", curvetype ="complete")
+```
+
+# Epidemic Plots 
+```{r}
+plot(epidat, plottype = "spatial")
+```
+
+
+# Run MCMC for 10000 iterations
+
+```{r, include=TRUE}
+mcmcout <- epimcmc(epidat,  tmax=max(epidat$remtime), niter=10000, sus.par.ini=0.01, beta.ini=0.01,         
+                   pro.sus.var=0.005, pro.beta.var=0.5, prior.sus.dist="uniform",
+                   prior.sus.par=c(0,10000), prior.beta.dist="uniform",
+                   prior.beta.par=c(0,10000), adapt=TRUE, acc.rate=0.5)
+```
+
+# Trace plots including burn-in
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1, density = FALSE)
+```
+
+# Trace plots with posterior density <br> (removed burn-in)
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1000, density = TRUE)
+```
+
+# Summary of posterior statistics
+```{r, include=TRUE}
+summary(mcmcout, start = 1000)
+```
+
+
+

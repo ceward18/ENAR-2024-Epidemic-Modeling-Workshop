@@ -1,0 +1,117 @@
+---
+title: "Fitting a Simple Spatial ILM to Data <br> (SI Version)"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+# Simple Spatial SI ILM
+
+```{r}
+library(EpiILM)
+```
+
+
+
+
+# Read in data
+
+```{r, include=TRUE}
+dat = read.table('DATA/ENAR_spatialepidemic.csv',header=T, sep=',')
+dat
+```
+
+# Form epidata object for analysis
+
+```{r, include=TRUE}
+epidat =as.epidata(type = "SI", n = 100, x=dat$x, y = dat$y, inftime = dat$inftime)
+epidat
+```
+
+
+# Epidemic Plots 
+
+```{r}
+plot(epidat, plottype = "curve", curvetype ="complete")
+```
+
+
+# Epidemic Plots 
+
+```{r}
+plot(epidat, plottype = "curve", curvetype ="newinfect")
+```
+
+# Epidemic Plots 
+```{r}
+plot(epidat, plottype = "spatial")
+```
+
+
+
+# Run MCMC just for 20 iterations
+
+```{r, include=TRUE}
+mcmcout <- epimcmc(epidat,  tmax = max(epidat$inftime), niter=20,
+                   sus.par.ini=0.01,  beta.ini=0.01, adapt=TRUE, Sformula = NULL, pro.sus.var = 0.1, 
+                   pro.beta.var = 0.1, prior.sus.dist="uniform", prior.sus.par=c(0,10000), 
+                   prior.beta.dist="uniform", prior.beta.par =c(0,10000), acc.rate = 0.5)
+
+mcmcout
+```
+
+# Run MCMC for 10000 iterations
+
+```{r, include=TRUE}
+mcmcout <- epimcmc(epidat,  tmax = max(epidat$inftime), niter=10000,
+                   sus.par.ini=0.01,  beta.ini=0.01, adapt=TRUE, Sformula = NULL, pro.sus.var = 0.1, 
+                   pro.beta.var = 0.1, prior.sus.dist="uniform", prior.sus.par=c(0,10000), 
+                   prior.beta.dist="uniform", prior.beta.par =c(0,10000), acc.rate = 0.5)
+```
+
+# Trace plots including burn-in
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1, density = FALSE)
+```
+
+# Trace plots with posterior density <br> (removed burn-in)
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1000, density = TRUE)
+```
+
+# Joint Posterior Plot
+
+```{r}
+library(ggplot2)
+alpha <- mcmcout$Estimates[1000:10000,1]
+beta <- mcmcout$Estimates[1000:10000,2]
+ggplot(data.frame(alpha,beta), aes(x=alpha, y=beta) ) +  geom_density_2d()
+```
+
+# Summary of posterior statistics
+```{r, include=TRUE}
+summary(mcmcout, start = 1000)
+```
+
+
+
+
+# Calculate DIC
+
+```{r}
+sus.parameters = mean(unlist(mcmcout$Estimates[1000:10000,1]))
+beta.par = mean(unlist(mcmcout$Estimates[1000:10000,2]))
+
+loglike <- epilike(epidat, tmax = max(epidat$inftime), Sformula = NULL, sus.par = sus.parameters,
+                     beta = beta.par)
+
+dic <- epidic(burnin = 1000, niter = 10000, LLchain = mcmcout$Loglikelihood,
+                LLpostmean = loglike)
+
+dic
+```

@@ -1,0 +1,429 @@
+---
+title: "Bayesian SIR Model - Incomplete Data"
+output: slidy_presentation
+---
+
+# Only Incidence is Observed 
+
+```{r}
+library(nimble)
+```
+
+# Model Code
+
+Model code is exactly the same as before. Differences will arise in specifying the 
+data when fitting the model.
+
+```{r}
+SIR_code <-  nimbleCode({
+    
+    S[1] <- N - I0 - R0
+    I[1] <- I0
+    R[1] <- R0
+    
+    probIR <- 1 - exp(-gamma)
+    
+    ### loop over time
+    for(t in 1:tau) {
+        
+        probSI[t] <- 1 - exp(- beta * I[t] / N)
+        
+        Istar[t] ~ dbin(probSI[t], S[t])
+        Rstar[t] ~ dbin(probIR, I[t])
+        
+        # update S, I, R
+        S[t + 1] <- S[t] - Istar[t]
+        I[t + 1] <- I[t] + Istar[t] - Rstar[t]
+        R[t + 1] <- R[t] + Rstar[t] 
+        
+    }
+    
+    # priors
+    beta ~ dgamma(0.1, 0.1)
+    gamma ~ dgamma(aa, bb)
+    
+})
+```
+
+
+# Simulate an example epidemic to use for model fitting
+
+```{r}
+constantsList <- list(N = 10000,
+                      I0 = 5,
+                      R0 = 0,
+                      tau = 60)
+
+
+sirModel <- nimbleModel(SIR_code, 
+                        constants = constantsList)
+
+# exclude data from parent nodes
+dataNodes <- c('Istar', 'Rstar')
+dataNodes <- sirModel$expandNodeNames(dataNodes, returnScalarComponents = TRUE)
+parentNodes <- sirModel$getParents(dataNodes, stochOnly = TRUE)
+parentNodes <- parentNodes[-which(parentNodes %in% dataNodes)]
+parentNodes <- sirModel$expandNodeNames(parentNodes, returnScalarComponents = TRUE)
+nodesToSim <- sirModel$getDependencies(parentNodes, self = FALSE, downstream = T)
+
+initsList <- list(beta = 0.6,
+                  gamma = 0.2)
+sirModel$setInits(initsList)
+
+set.seed(1)
+sirModel$simulate(nodesToSim, includeData = TRUE)
+
+trueIstar <- sirModel$Istar
+
+plot(trueIstar, main = 'Epidemic curve', xlab = 'Time', ylab = 'Incidence', 
+     type = 'l')
+
+```
+
+
+# Writing the Proposal Function
+
+A proposal function in NIMBLE has some restrictions in formatting/functions that 
+can be used as it will be compiled in C++.
+
+https://r-nimble.org/html_manual/cha-RCfunctions.html#sec:r-fiunctions-implemented 
+
+```{r}
+RstarUpdate <- nimbleFunction(
+    name = 'RstarUpdate',                              
+    contains = sampler_BASE,                     
+    setup = function(model, mvSaved, target, control) {  # REQUIRED setup arguments
+        calcNodes <- model$getDependencies(target) 
+        
+        # number of update attempts at each iteration
+        nUpdates <- 100
+    },        # setup can't return anything
+    run = function() {
+        currentValue <- model[[target]]                                   
+        currentLogProb <- model$getLogProb(calcNodes)     
+        
+        nTimePoints <- length(currentValue)
+        
+        # repeat proposal many times 
+        for (it in 1:nUpdates) {
+            
+            # three possible moves:
+            moveType <- ceiling(runif(1, 0, 3))
+            proposalValue <- currentValue
+            
+            if (moveType == 1) {
+                # add a removal time
+                addIdx <- runif(1, 1, nTimePoints + 1)
+                proposalValue[addIdx] <- proposalValue[addIdx] + 1
+                
+                # g(old|new) - g(new|old)
+                # subtract from new - add to old
+                possibleSubtract <- which(proposalValue > 0)
+                g <- -log(length(possibleSubtract)) + log(nTimePoints)
+                
+                
+            } else if (moveType == 2) {
+                # move a removal time
+                possibleSubtract <- which(currentValue > 0)
+                subtractIdx <- possibleSubtract[runif(1, 1, length(possibleSubtract) + 1)]
+                addIdx <- runif(1, 1, nTimePoints + 1)
+                
+                proposalValue[subtractIdx] <- proposalValue[subtractIdx] - 1
+                proposalValue[addIdx] <- proposalValue[addIdx] + 1
+                
+                # g(old|new) - g(new|old)
+                # possibly have different number of values to subtract from 
+                newPossibleSubtract <- which(proposalValue > 0)
+                g <- -log(length(newPossibleSubtract)) +log(length(possibleSubtract))
+                
+            } else if (moveType == 3) {
+                # subtract a removal time
+                possibleSubtract <- which(currentValue > 0)
+                subtractIdx <- possibleSubtract[runif(1, 1, length(possibleSubtract) + 1)]
+                proposalValue[subtractIdx] <- proposalValue[subtractIdx] - 1
+                
+                # g(old|new) - g(new|old)
+                # add to new - subtract from old
+                g <- -log(nTimePoints) + log(length(possibleSubtract)) 
+                
+            }
+            
+            # put proposal value in model
+            model[[target]] <<- proposalValue                                
+            proposalLogProb <- model$calculate(calcNodes)                     
+            logAcceptanceRatio <- proposalLogProb - currentLogProb + g            
+            
+            accept <- decide(logAcceptanceRatio)                              
+            
+            if (accept) {
+                # no changes to model object needed
+                currentLogProb <- proposalLogProb
+                currentValue <- proposalValue
+                
+            } else {
+                # reject proposal and revert model to current state
+                model[[target]] <<- currentValue
+                
+                # current full conditional (calculate overwrites the stored value)
+                currentLogProb <- model$calculate(calcNodes) 
+            }
+            
+        } # end loop
+        
+        # synchronize model -> mvSaved after nUpdates
+        copy(from = model, to = mvSaved, row = 1, nodes = calcNodes, logProb = TRUE)
+        
+    },
+    methods = list(                              # required method for sampler_BASE base class
+        reset = function() {}
+    )
+)
+```
+
+
+# Incomplete Data - Model Configuration and Sampling
+
+$R^*$ is initialized by specifying all removals happen five days after infection.
+
+```{r}
+dataList <- list(Istar = trueIstar)
+
+bb <- 348
+aa <- 0.2 * bb
+
+tau <- length(dataList$Istar)
+
+constantsList <- list(N = 10000,
+                      I0 = 5,
+                      R0 = 0,
+                      tau = tau,
+                      aa = aa,
+                      bb = bb) 
+
+set.seed(4)
+initsList <- list(beta = runif(1, 0, 1),
+                  gamma = rgamma(1, aa, bb), 
+                  Rstar = c(rep(0, 4),
+                            constantsList$I0, 
+                            head(dataList$Istar, -5)))
+
+
+sirModelFit <- nimbleModel(SIR_code, 
+                           constants = constantsList,
+                           data = dataList,
+                           inits = initsList)
+
+with(sirModelFit, cbind(S=S[-(tau + 1)], Istar, I=I[-(tau + 1)], 
+                        Rstar, R=R[-(tau + 1)]))[1:10,]
+
+
+
+myConfig <- configureMCMC(sirModelFit)
+
+myConfig$removeSamplers('Rstar') 
+myConfig$addSampler(target = c('Rstar'),
+                    type = "RstarUpdate")
+myConfig$addMonitors(c('Rstar'))
+myConfig
+
+nimbleOptions(MCMCusePredictiveDependenciesInCalculations = TRUE)
+myMCMC <- buildMCMC(myConfig)
+
+system.time({
+    compiled <- compileNimble(sirModelFit, myMCMC) 
+    samples <- runMCMC(compiled$myMCMC, niter = 100000, nburnin = 50000, setSeed = 5)
+})
+
+head(samples)
+```
+
+# Trace Plots of Parameters
+
+```{r}
+par(mfrow = c(1,2))
+plot(samples[,'beta'], type = 'l')
+abline(h = 0.6, col = 'red')
+plot(samples[,'gamma'], type = 'l')
+abline(h = 0.2, col = 'red')
+```
+
+# Posterior Distribution of Estimated Removal Times
+
+```{r}
+RstarSamples <- samples[,grep('Rstar', colnames(samples))]
+
+RstarMean <- colMeans(RstarSamples)
+RstarCI <- apply(RstarSamples, 2, quantile, probs = c(0.025, 0.975))
+
+plot(RstarMean, type = 'l', ylim = c(0, 700))
+lines(RstarCI[1,], lty = 2)
+lines(RstarCI[2,], lty = 2)
+lines(sirModel$Rstar, col = 'red')
+legend('topright', c('posterior mean', 'truth'), col = c('black', 'red'), lwd = 1)
+```
+
+
+# Evaluating Prior Sensitivity for Gamma
+
+The previously used prior puts 90% probability on the mean infectious period 
+being between 4 and 6 days, centered on 5 days.
+
+```{r}
+bb <- 348
+aa <- 0.2 * bb
+pgamma(1/4, aa, bb) - pgamma(1/6, aa, bb)
+curve(dgamma(x, aa, bb))
+```
+
+Now, we will compare this with a weaker and stronger prior, both also centered
+on 5 days.
+
+```{r, fig.width = 12}
+par(mfrow = c(1,2))
+bb_2 <- 57
+aa_2 <- 0.2 * bb_2
+pgamma(1/4, aa_2, bb_2) - pgamma(1/6, aa_2, bb_2)
+curve(dgamma(x, aa_2, bb_2), main = 'weaker prior')
+
+
+bb_3 <- 2000
+aa_3 <- 0.2 * bb_3
+pgamma(1/4, aa_3, bb_3) - pgamma(1/6, aa_3, bb_3)
+curve(dgamma(x, aa_3, bb_3), main = 'stronger prior')
+```
+
+We will also use a joint MH proposal for beta and gamma to try and account for the correlation 
+between these two parameters.
+
+```{r}
+dataList <- list(Istar = trueIstar)
+
+# Weaker prior
+
+constantsList <- list(N = 10000,
+                      I0 = 5,
+                      R0 = 0,
+                      tau = length(dataList$Istar),
+                      aa = aa_2,
+                      bb = bb_2) 
+
+set.seed(8)
+initsList <- list(beta = runif(1, 0, 1),
+                  gamma = rgamma(1, aa_2, bb_2), 
+                  Rstar = c(rep(0, 4),
+                            constantsList$I0, 
+                            head(dataList$Istar, -5)))
+
+
+sirModelFit <- nimbleModel(SIR_code, 
+                           constants = constantsList,
+                           data = dataList,
+                           inits = initsList)
+
+myConfig <- configureMCMC(sirModelFit)
+
+myConfig$removeSamplers('Rstar') 
+myConfig$addSampler(target = c('Rstar'),
+                    type = "RstarUpdate")
+myConfig$addMonitors(c('Rstar'))
+
+# block sampler for transmission parameters
+paramsForBlock <- c('beta', 'gamma')
+myConfig$removeSampler(paramsForBlock)
+myConfig$addSampler(target = paramsForBlock, type = "RW_block",
+                    control = list(adaptInterval = 100,
+                                   propCov = diag(c(0.2, 0.2))))
+
+myConfig
+
+nimbleOptions(MCMCusePredictiveDependenciesInCalculations = TRUE)
+myMCMC <- buildMCMC(myConfig)
+
+system.time({
+    compiled <- compileNimble(sirModelFit, myMCMC) 
+    samplesWeak <- runMCMC(compiled$myMCMC, niter = 100000, nburnin = 50000, setSeed = 15)
+})
+
+
+#### Stronger prior
+
+dataList <- list(Istar = trueIstar)
+
+constantsList <- list(N = 10000,
+                      I0 = 5,
+                      R0 = 0,
+                      tau = length(dataList$Istar),
+                      aa = aa_3,
+                      bb = bb_3) 
+
+set.seed(1)
+initsList <- list(beta = runif(1, 0, 1),
+                  gamma = rgamma(1, aa_3, bb_3), 
+                  Rstar = c(rep(0, 4),
+                            constantsList$I0, 
+                            head(dataList$Istar, -5)))
+
+
+sirModelFit <- nimbleModel(SIR_code, 
+                           constants = constantsList,
+                           data = dataList,
+                           inits = initsList)
+
+myConfig <- configureMCMC(sirModelFit)
+
+myConfig$removeSamplers('Rstar') 
+myConfig$addSampler(target = c('Rstar'),
+                    type = "RstarUpdate")
+myConfig$addMonitors(c('Rstar'))
+
+# block sampler for transmission parameters
+paramsForBlock <- c('beta', 'gamma')
+myConfig$removeSampler(paramsForBlock)
+myConfig$addSampler(target = paramsForBlock, type = "RW_block",
+                    control = list(adaptInterval = 100,
+                                   propCov = diag(c(0.2, 0.2))))
+
+myConfig
+
+nimbleOptions(MCMCusePredictiveDependenciesInCalculations = TRUE)
+myMCMC <- buildMCMC(myConfig)
+
+system.time({
+    compiled <- compileNimble(sirModelFit, myMCMC) 
+    samplesStrong <- runMCMC(compiled$myMCMC, niter = 100000, nburnin = 50000, setSeed = 12)
+})
+
+
+```
+
+
+```{r, fig.width = 12, fig.height=12}
+par(mfrow = c(2,2))
+plot(samplesWeak[,'beta'], type = 'l', main = 'beta - weaker prior')
+abline(h = 0.6, col = 'red')
+plot(samplesWeak[,'gamma'], type = 'l', main = 'gamma - weaker prior')
+abline(h = 0.2, col = 'red')
+plot(samplesStrong[,'beta'], type = 'l', main = 'beta - stronger prior')
+abline(h = 0.6, col = 'red')
+plot(samplesStrong[,'gamma'], type = 'l', main = 'gamma - stronger prior')
+abline(h = 0.2, col = 'red')
+```
+
+# Compare Posterior distributions
+
+```{r, fig.width = 12}
+par(mfrow = c(1,3))
+hist(samples[,'gamma'], freq = F, main = 'initial prior', xlim = c(0.12, 0.26))
+curve(dgamma(x, aa, bb), add = T, col = 'red')
+
+hist(samplesWeak[,'gamma'], freq = F, main =  'weaker prior', xlim = c(0.12, 0.26))
+curve(dgamma(x, aa_2, bb_2), add = T, col = 'red')
+
+hist(samplesStrong[,'gamma'], freq = F, main =  'stronger prior', xlim = c(0.12, 0.26))
+curve(dgamma(x, aa_3, bb_3), add = T, col = 'red')
+
+summary(samples[,'gamma'])
+summary(samplesWeak[,'gamma'])
+summary(samplesStrong[,'gamma'])
+```
+

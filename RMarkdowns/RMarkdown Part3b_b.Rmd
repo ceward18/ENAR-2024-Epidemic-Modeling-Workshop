@@ -1,0 +1,82 @@
+---
+title: "Fitting Spatial ILM to Data with Covariates <br> (SI Version)"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+#  Spatial SI ILM  with Covariates
+
+```{r}
+library(EpiILM)
+```
+
+
+
+
+# Read in data
+
+```{r, include=TRUE}
+dat = read.table('DATA/ENAR_spatialepidemic.csv',header=T, sep=',')
+dat
+```
+
+# Form epidata object for analysis
+
+```{r, include=TRUE}
+epidat =as.epidata(type = "SI", n = 100, x=dat$x, y = dat$y, inftime = dat$inftime)
+epidat
+```
+
+
+
+#  Spatial Model with Covariate: <br> Run MCMC for 20000 iterations
+
+```{r, include=TRUE}
+mcmcout2 <- epimcmc(epidat,  tmax = max(epidat$inftime), niter=20000,
+                   sus.par.ini=c(0.5, 0.55),  beta.ini=3.0, adapt=TRUE, Sformula = ~dat$XA,
+                   pro.sus.var = c(0.1, 0.1), pro.beta.var = 0.1, 
+                   prior.sus.dist=c("uniform", "uniform"),
+                   prior.sus.par=matrix(c(0,0,10000,10000), ncol = 2, nrow = 2),
+                   prior.beta.dist="uniform", 
+                   prior.beta.par =c(0,10000), acc.rate = 0.5)
+```
+
+
+```{r, include=TRUE}
+plot(mcmcout2, partype = "parameter", start = 1, density = FALSE)
+```
+
+
+Trace plots with posterior density <br> (removed burn-in)
+
+```{r, include=TRUE}
+plot(mcmcout2, partype = "parameter", start = 5000, density = TRUE)
+```
+
+
+# Summary of posterior statistics
+```{r, include=TRUE}
+summary(mcmcout2, start = 5000)
+```
+
+
+
+# Calculate DIC
+
+```{r}
+sus.parameters = c( mean(unlist(mcmcout2$Estimates[5000:20000,1])), mean(unlist(mcmcout2$Estimates[5000:20000,2])))
+beta.par = mean(unlist(mcmcout2$Estimates[5000:20000,3]))
+
+loglike <- epilike(epidat, tmax = max(epidat$inftime), Sformula = ~dat$XA, sus.par = sus.parameters,
+                     beta = beta.par)
+
+dic <- epidic(burnin = 5000, niter = 20000, LLchain = mcmcout2$Loglikelihood,
+                LLpostmean = loglike)
+
+dic
+```
+

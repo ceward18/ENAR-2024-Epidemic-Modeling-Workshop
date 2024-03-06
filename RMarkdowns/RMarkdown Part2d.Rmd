@@ -1,0 +1,281 @@
+---
+title: "Spatial SIR Model"
+output: slidy_presentation
+---
+
+```{r}
+library(nimble)
+library(geodata)
+library(sf)
+library(ggplot2)
+library(transformr)
+library(gganimate)
+
+```
+
+
+# Writing the spatial model in NIMBLE
+
+```{r}
+spatial_SIR_code <-  nimbleCode({
+    
+    # initial conditions in each location
+    for (j in 1:nRegions) {
+        
+        S[1, j] <- N[j] - I0[j] - R0[j]
+        I[1, j] <- I0[j]
+        R[1, j] <- R0[j]
+        
+    }
+    
+    # removal probability is constant across regions
+    probIR <- 1 - exp(-gamma)
+    
+    ### loop over time
+    for(t in 1:nTime) {
+        
+        # loop over spatial locations
+        for (j in 1:nRegions) {
+            
+            # transmission to location from location j at time t
+            eta[t, j] <- beta[t, j] * I[t, j] / N[j]
+            
+            # transmission to location j from its neighbors at time t
+            neighborRate[t, j] <- inprod(eta[t, 1:nRegions], A[j, 1:nRegions])
+            
+            # total transmission to location j
+            transRate[t, j] <- eta[t, j] + rho * neighborRate[t, j]
+            
+            probSI[t, j] <- 1 - exp(- transRate[t, j])
+            
+            Istar[t, j] ~ dbin(probSI[t, j], S[t, j])
+            Rstar[t, j] ~ dbin(probIR, I[t, j])
+            
+            # update S, I, R
+            S[t + 1, j] <- S[t, j] - Istar[t, j]
+            I[t + 1, j] <- I[t, j] + Istar[t, j] - Rstar[t, j]
+            R[t + 1, j] <- R[t, j] + Rstar[t, j] 
+            
+            # priors
+            beta[t, j] ~ dgamma(0.1, 0.1)
+            
+        }
+    }
+    
+    # priors
+    gamma ~ dgamma(aa, bb)
+    
+})
+```
+
+
+# Iowa county level map and population sizes
+
+```{r}
+States <- gadm('United States', level = 2, path = './DATA/')
+iowa <- States[States$NAME_1 == 'Iowa',]
+
+# population counts by county from stored data
+popDat <- read.csv('./DATA/iowaCountyPopulations.csv')
+iowa <- merge(iowa, popDat, by.x = 'NAME_2', by.y = 'county')
+
+class(iowa)
+
+head(iowa)
+
+# plot Iowa counties colored by population size
+plot(iowa, y = 'pop', col = rev(heat.colors(n = 5)), box = F, axes = F)
+# put a star on johnson county
+points(x = -91.5984, y = 41.6699, pch = 8)
+```
+
+
+# Specify initial conditions and parameter values
+
+We will assume 5 initially infectious individuals in Johnson county. Transmission
+varies by county until the intervention is implemented on day 26, then transmission
+is highly reduced across the state.
+
+We simulate 100 days of the epidemic
+
+```{r}
+# create adjacency matrix 
+adj_mat <- matrix(0, nrow = nrow(iowa), ncol = nrow(iowa))
+adj_mat[adjacent(iowa)] <- 1
+
+# initially 5 infectious people in Johnson county
+nRegions <- nrow(iowa)
+I0 <- rep(0, nRegions)
+I0[which(iowa$NAME_2 == 'Johnson')] <- 5
+
+constantsList <- list(N = iowa$pop,
+                      I0 = I0,
+                      R0 = rep(0, nRegions),
+                      nTime = 100,
+                      nRegions = nRegions,
+                      A = adj_mat)
+
+# transmission constant until time 25, then is reduced across state
+set.seed(1)
+beta0 <- exp(rnorm(nRegions, mean = log(0.3), sd = 0.1))
+betaMat <- matrix(exp(rnorm(nRegions, mean = log(0.25), sd = 0.1)), 
+                  ncol= nRegions, nrow = constantsList$nTime, byrow = T)
+
+betaMat[26:constantsList$nTime,] <- 0.07
+
+initsList <- list(beta = betaMat, 
+                  rho = 0.2,
+                  gamma = 0.25)
+
+
+```
+
+Creating the model can be slow, taking 30min to an hour as Nimble has to set up
+several large matrices (99 regions x 100 time points). For the purposes of this workshop, I have ran this and the simulation on the next slide ahead of time and saved it as './DATA/spatial_model.rds'
+
+```{r, eval = F}
+myModel <- nimbleModel(spatial_SIR_code, 
+                       constants = constantsList,
+                       inits = initsList)
+```
+
+
+# Simulate an epidemic
+
+Once the model is set up, simulating from the model can be done fairly quickly. The simulation takes about 12 seconds.
+
+```{r, eval = F}
+dataNodes <- c( 'Istar', 'Rstar')
+dataNodes <- myModel$expandNodeNames(dataNodes, returnScalarComponents = TRUE)
+parentNodes <- myModel$getParents(dataNodes, stochOnly = TRUE)
+parentNodes <- parentNodes[-which(parentNodes %in% dataNodes)]
+parentNodes <- myModel$expandNodeNames(parentNodes, returnScalarComponents = TRUE)
+nodesToSim <- myModel$getDependencies(parentNodes, self = FALSE, downstream = T)
+
+set.seed(1)
+
+system.time({
+    myModel$simulate(nodesToSim, includeData = TRUE)
+})
+```
+
+
+
+```{r, echo = F}
+myModel <- readRDS('./DATA/spatial_model.rds')
+```
+
+
+# Epidemic curves
+
+We will look at epidemic trajectory in 4 of the more populous counties.
+
+```{r}
+iowa$countiesOfInterest <- 0
+iowa$countiesOfInterest[iowa$NAME_2 %in% c('Johnson',
+                                           'Linn',
+                                           'Black Hawk', 
+                                           'Polk')] <- 1
+
+# plot Iowa counties colored by population size
+plot(iowa, y = 'countiesOfInterest', col = c('white', 'lightblue'), 
+     legend = F, box = F, axes = F)
+# label counties
+text(x = -91.5984, y = 41.6699, 'Johnson')
+text(x = -91.6, y = 42.0660, 'Linn')
+text(x = -92.3814, y = 42.4478, 'Black Hawk')
+text(x = -93.58, y = 41.67, 'Polk')
+```
+
+
+```{r}
+# plot epi curves in a few counties
+par(mfrow = c(2,2))
+
+idx <- which(iowa$NAME_2 == 'Johnson')
+plot(myModel$Istar[,idx], type = 'l', 
+     main = paste0(iowa$NAME_2[idx], ' County\nN = ', 
+                   scales::comma(constantsList$N[idx]),
+                   ', beta0 = ', round(beta0[idx], 3)),
+     ylab = 'Incidence', ylim = c(0, 200))
+
+idx <- which(iowa$NAME_2 == 'Linn')
+plot(myModel$Istar[,idx], type = 'l', 
+     main = paste0(iowa$NAME_2[idx], ' County\nN = ',  
+                   scales::comma(constantsList$N[idx]),
+                   ', beta0 = ', round(beta0[idx], 3)),
+     ylab = 'Incidence', ylim = c(0, 200))
+
+idx <- which(iowa$NAME_2 == 'Black Hawk')
+plot(myModel$Istar[,idx], type = 'l', 
+     main = paste0(iowa$NAME_2[idx], ' County\nN = ', 
+                   scales::comma(constantsList$N[idx]),
+                   ', beta0 = ', round(beta0[idx], 3)),
+     ylab = 'Incidence', ylim = c(0, 200))
+
+idx <- which(iowa$NAME_2 == 'Polk')
+plot(myModel$Istar[,idx], type = 'l', 
+     main = paste0(iowa$NAME_2[idx], ' County\nN = ',
+                   scales::comma(constantsList$N[idx]),
+                   ', beta0 = ', round(beta0[idx], 3)),
+     ylab = 'Incidence', ylim = c(0, 200))
+
+```
+
+
+
+
+# Visualize epidemic spread
+
+```{r, warning = F}
+# convert to sf for use with ggplot
+iowa_sf <- st_as_sf(iowa)
+
+# merge with simulated incidence matrix
+incData <- data.frame(t(myModel$Istar))
+incData$X <- 1:nrow(incData)
+
+iowa_sf_wide <- merge(iowa_sf, incData, by = 'X')
+
+# convert to long format for gganimate
+iowa_sf_wide <- iowa_sf_wide[,c('NAME_2', paste0('X', 1:100))]
+
+iowa_sf_long <- reshape(iowa_sf_wide, 
+                        varying = paste0('X', 1:100), 
+                        v.names = "Count",
+                        timevar = "timePeriod", 
+                        times = paste0('X', 1:100), 
+                        new.row.names = 1:1e6,
+                        direction = "long")
+iowa_sf_long$day <- as.numeric(gsub('X', '', iowa_sf_long$timePeriod))
+iowa_sf_long <- iowa_sf_long[order(iowa_sf_long$NAME_2),]
+
+iowa_sf_long$Count2 <- cut(iowa_sf_long$Count, 
+                       breaks=c(0, 1, 2, 10, 25, 50, 75, 100, 160),
+                       include.lowest=TRUE, right=FALSE)
+iowa_sf_long$Count2 <- factor(iowa_sf_long$Count2,
+                                    levels=rev(levels(iowa_sf_long$Count2)))
+
+
+pal <- c(heat.colors(7), 'grey')
+
+theme_opts <- list(theme(axis.text = element_blank(),
+                         axis.ticks = element_blank(),
+                         panel.grid.major = element_blank(), 
+                         panel.grid.minor = element_blank(),
+                         panel.background = element_blank(), 
+                         axis.line = element_blank()))
+
+# animate using gganimate
+epi_animate <- ggplot(iowa_sf_long, aes(fill=Count2)) +
+    geom_sf() +
+    theme_opts +
+    scale_fill_manual(drop=FALSE,values=pal) +
+    labs(title = "Day: {next_state}", fill='New Infections', x='', y='') +
+    transition_states(day) +
+    ease_aes('linear')
+
+animate(epi_animate, 
+        duration = 100,
+        fps = 1)
+```

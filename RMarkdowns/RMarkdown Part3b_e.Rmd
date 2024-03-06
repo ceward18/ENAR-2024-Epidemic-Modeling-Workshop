@@ -1,0 +1,319 @@
+---
+title: "Fitting a Network ILM to Data <br> (SI Version) <br> and forecasting via the ILM"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+# Simple Spatial SI ILM
+
+```{r}
+library(EpiILM)
+```
+
+
+
+
+# Read the contact matrix file 
+
+```{r, include=TRUE}
+contact_mat = matrix(scan("DATA/ENAR_network_fit.csv", what=numeric(), sep=","), nrow=100)
+contact_mat
+```
+
+# Read infection times file
+
+```{r, include=TRUE}
+inftime = read.table("DATA/ENAR_network_inftime.csv",header=F)
+inftime
+```
+
+# Form epidata object for analysis
+
+```{r, include=TRUE}
+epidat =as.epidata(type = "SI", n = 100, contact=contact_mat, inftime = inftime[,1])
+epidat
+```
+
+# Epidemic Plots 
+
+
+```{r}
+plot(epidat, plottype = "curve", curvetype ="complete")
+```
+
+
+# Epidemic Plots 
+
+```{r}
+plot(epidat, plottype = "curve", curvetype ="newinfect")
+```
+
+
+
+# Run MCMC for 10000 iterations
+
+```{r, include=TRUE}
+mcmcout = epimcmc(epidat, tmax=max(inftime), niter=10000, sus.par.ini=0.01, pro.sus.var=0.0005,
+  prior.sus.dist="uniform", prior.sus.par=c(0,10000), adapt=TRUE, acc.rate=0.5 )
+
+```
+
+
+
+
+
+
+# Trace plots including burn-in
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1, density = FALSE)
+```
+
+# Trace plots with posterior density <br> (removed burn-in)
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1000, density = TRUE)
+```
+
+
+# Summary of posterior statistics
+```{r, include=TRUE}
+summary(mcmcout, start = 1000)
+```
+
+
+
+
+
+# Let's do some conditional forecasting <br> from time point 10
+
+
+First fit the model to the first 10 time points
+
+```{r, include=TRUE}
+mcmcout = epimcmc(epidat, tmax=10, niter=10000, sus.par.ini=0.01, pro.sus.var=0.0005,
+  prior.sus.dist="uniform", prior.sus.par=c(0,10000), adapt=TRUE, acc.rate=0.5 )
+
+```
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1000, density = TRUE)
+```
+
+```{r, include=TRUE}
+summary(mcmcout, start = 1000)
+```
+
+
+
+# Now let's simulate forward from time point 10
+
+
+```{r}
+
+# Fix the infection times up to time point 10; any after that are set = 0 
+
+tminobs= 10
+tmaxobs= 25
+
+inftime_NEW <- inftime[,1]
+inftime_NEW[inftime_NEW>tminobs] = 0
+
+
+
+# Generate 500 samples from posterior (stationary MCMC output) 
+sample <- mcmcout$Estimates[sample(nrow(mcmcout$Estimates), 500, replace=FALSE), ]
+out <- vector(mode = "list", length = 500)
+
+
+
+# Generate 500 new epidemics based on simulation from those 500 posterior samples
+
+for (i in 1:500)
+  {
+  dat_nn <- epidata(type="SI", tmax=tmaxobs, tmin=tminobs,    sus.par=sample[i], n = 100, contact=contact_mat, inftime=inftime_NEW)
+   out[[i]] <- dat_nn$inftime }
+
+infect <- matrix(0, ncol=tmaxobs, nrow=500)
+for (j in 1:500)
+  {
+   newinf <- rep(0)
+   for (i in 1:  tmaxobs){
+   newinf[i] <- length(out[[j]][out[[j]]==i])}
+   infect[j,] <- newinf 
+   }
+
+
+# Summarize epidemics 
+
+new <- rep(0)
+for (i in 1:  tmaxobs){ new[i] <- length(inftime[inftime==i]) }
+
+avg <- rep(0)
+lowerq <- rep(0)
+upperq <- rep(0)
+for (i in 1:  tmaxobs)
+  {
+   avg[i] <- mean(infect[,i])
+   lowerq[i] <- quantile(infect[,i], 0.025)
+   upperq[i] <- quantile(infect[,i], 0.975) 
+   }
+
+```
+ 
+ 
+# Plots of posterior predictive epidemic curves 
+
+```{r}
+time <- rep(1:tmaxobs)
+
+plot (time, new, xlim=c(min(time), max(time)), ylim=c(0,20),
+  ylab="new infections ", xlab=" time", type="l", pch=20, lwd=2,
+  xaxt="n",col="black")
+
+axis(1, at=1:max(time))
+
+par(new=TRUE)
+
+for (i in 1:500) {
+  lines(seq(tminobs,tmaxobs),infect[i,][tminobs:tmaxobs],col="darkgray",lwd=0.2)}
+
+```
+
+
+
+
+# Plots of posterior predictive epidemic curve summaries
+
+```{r}
+
+plot (time, new, xlim=c(min(time), max(time)), ylim=c(0,20),
+  ylab="new infections ", xlab=" time", type="l", pch=20, lwd=2,
+  xaxt="n")
+
+
+axis(1, at=1:max(time))
+lines(lowerq, col="red",lwd=1,lty=2)
+lines(upperq, col="red",lwd=1,lty=2)
+lines(seq(tminobs,tmaxobs),avg[tminobs:tmaxobs],col="red",lwd=1.5)
+
+```
+
+
+
+
+# Let's do some conditional forecasting - from time point 6
+
+
+```{r, include=TRUE}
+mcmcout = epimcmc(epidat, tmax=16, niter=10000, sus.par.ini=0.01, pro.sus.var=0.0005,
+  prior.sus.dist="uniform", prior.sus.par=c(0,10000), adapt=TRUE, acc.rate=0.5 )
+
+```
+
+```{r, include=TRUE}
+plot(mcmcout, partype = "parameter", start = 1000, density = TRUE)
+```
+
+```{r, include=TRUE}
+summary(mcmcout, start = 1000)
+```
+
+
+
+
+```{r}
+tminobs= 6
+tmaxobs=25
+
+inftime_NEW <- inftime[,1]
+inftime_NEW[inftime_NEW>tminobs] = 0
+
+sample <- mcmcout$Estimates[sample(nrow(mcmcout$Estimates), 500, replace=FALSE), ]
+out <- vector(mode = "list", length = 500)
+
+
+
+
+
+for (i in 1:500)
+  {
+  dat_nn <- epidata(type="SI", tmax=tmaxobs, tmin=tminobs,    sus.par=sample[i], n = 100, contact=contact_mat, inftime=inftime_NEW)
+   out[[i]] <- dat_nn$inftime }
+
+
+infect <- matrix(0, ncol=tmaxobs, nrow=500)
+for (j in 1:500)
+  {
+   newinf <- rep(0)
+   for (i in 1:  tmaxobs){
+   newinf[i] <- length(out[[j]][out[[j]]==i])}
+   infect[j,] <- newinf 
+   }
+
+
+new <- rep(0)
+for (i in 1:  tmaxobs){ new[i] <- length(inftime[inftime==i]) }
+
+
+
+avg <- rep(0)
+lowerq <- rep(0)
+upperq <- rep(0)
+for (i in 1:  tmaxobs)
+  {
+   avg[i] <- mean(infect[,i])
+   lowerq[i] <- quantile(infect[,i], 0.025)
+   upperq[i] <- quantile(infect[,i], 0.975) 
+   }
+
+```
+ 
+# Plots of posterior predictive epidemic curves
+
+```{r}
+time <- rep(1:tmaxobs)
+
+plot (time, new, xlim=c(min(time), max(time)), ylim=c(0,20),
+  ylab="new infections ", xlab=" time", type="l", pch=20, lwd=2,
+  xaxt="n",col="black")
+
+axis(1, at=1:max(time))
+
+par(new=TRUE)
+
+for (i in 1:500) {
+  lines(seq(tminobs,tmaxobs),infect[i,][tminobs:tmaxobs],col="darkgray",lwd=0.2)}
+
+```
+
+
+# Plots of posterior predictive epidemic summaries
+
+
+```{r}
+
+plot (time, new, xlim=c(min(time), max(time)), ylim=c(0,20),
+  ylab="new infections ", xlab=" time", type="l", pch=20, lwd=2,
+  xaxt="n")
+
+
+axis(1, at=1:max(time))
+lines(lowerq, col="red",lwd=1,lty=2)
+lines(upperq, col="red",lwd=1,lty=2)
+lines(seq(tminobs,tmaxobs),avg[tminobs:tmaxobs],col="red",lwd=1.5)
+
+```
+
+
+
+
+
+```{r, include=TRUE}
+knitr::knit_exit()
+```
+

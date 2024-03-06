@@ -1,0 +1,117 @@
+---
+title: "Simulation from a Simple Spatial ILM (SI Version)"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+# Simple Spatial SI ILM
+
+```{r}
+library(EpiILM)
+```
+
+
+
+
+# Simulation Spatial Population
+
+```{r, include=TRUE}
+ 
+x = runif(100, 0, 10)
+y = runif(100, 0, 10)
+plot (x,y, cex=0.3)
+```
+
+# Simulation Epidemic Through Population
+
+```{r, include=TRUE}
+
+SI.dis = epidata(type = "SI", n = 100, tmax = 15, sus.par = 0.3, 
+                 beta = 5.0, x = x, y = y)
+```
+
+
+```{r}
+SI.dis
+```
+
+
+
+# Epidemic Plots 
+
+
+```{r}
+plot(SI.dis, plottype = "curve", curvetype ="complete")
+```
+
+# Epidemic Plots 
+```{r}
+plot(SI.dis, plottype = "curve", curvetype ="totalinfect")
+```
+
+# Epidemic Plots 
+```{r}
+plot(SI.dis, plottype = "curve", curvetype ="newinfect")
+```
+
+# Epidemic Plots 
+```{r}
+plot(SI.dis, plottype = "spatial")
+```
+
+
+
+# Multiple Epidemics
+
+Let’s repeat the epidemic simulation 20 times 
+
+Choose initial infection to be individual 10 at time point 3
+
+```{r}
+inftime <- rep(0,100)
+inftime[10] <- 3
+
+out1 <- vector(mode = "list", length = 20)
+for (i in 1:20){
+    dat <- epidata(type="SI", n=100, tmax = 50, sus.par = 0.3, 
+                 beta = 5.0, x = x, y = y, inftime=inftime)
+    out1[[i]] <- dat$inftime }
+```
+
+
+
+
+Calculate the number of new infections at each time point
+```{r}
+infect1 <- vector(mode = "list", length = 20)
+for (j in 1:20){
+    newinf <- rep(0)
+     for (i in 1:50){
+     newinf[i] <- length(out1[[j]][out1[[j]]==i]) }
+     infect1[[j]] <- newinf }
+```
+
+#
+
+Plot this:
+
+```{r}
+infectmax <- vector(mode = "list", length = 20)
+  for (j in 1:20){ infectmax[[j]]=max(infect1[[j]] ) }
+  infectmax <- unlist(infectmax)
+  max1 <- max(infectmax)
+
+  plot(seq(1:50),infect1[[1]],type="b",pch=20,lwd=2,
+    xaxt="n",xlab="time ",ylab="New infections",ylim=c(0,max1))
+  axis(1, at=1:50)
+  for (j in 2:20){
+    lines(seq(1:50),infect1[[j]],type="b",pch=20,lwd=2,
+    xaxt="n",xlab="",yaxt="n",ylab="") }
+  
+```
+  
+

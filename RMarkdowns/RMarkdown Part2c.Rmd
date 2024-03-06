@@ -1,0 +1,778 @@
+---
+title: "SEIR Model with Intervention"
+output: slidy_presentation
+---
+
+# SEIR Model Example - Ebola
+
+```{r}
+library(nimble)
+library(outbreaks)
+library(ggplot2)
+library(plyr)
+```
+
+# 2014-2015 Ebola in Sierra Leone
+
+```{r}
+ebola <- ebola_sierraleone_2014
+ebola <- ddply(ebola, .(date_of_onset), summarize, 
+               cases = length(id))
+
+# fill in missing dates with 0 cases
+allDates <- data.frame(date_of_onset = seq(min(ebola$date_of_onset),
+                                           max(ebola$date_of_onset), 1))
+ebola <- merge(allDates, ebola, by = 'date_of_onset', all.x = T)
+ebola <- ebola[order(ebola$date_of_onset),]
+ebola$day <- 1:nrow(ebola)
+ebola$cases[is.na(ebola$cases)] <- 0
+
+head(ebola)
+
+summary(ebola[,-1])
+
+plot(ebola$date_of_onset, ebola$cases, type = 'h', main = 'Incidence')
+abline(v = as.Date('2014-10-01'), col = 'red')
+abline(v = as.Date('2014-12-28'), col = 'red')
+
+```
+
+
+# Writing the SEIR model
+
+To incorporate the intervention effects, we allow transmission to be written flexibly using a design matrix $\boldsymbol{X}$ and associated coefficients $\boldsymbol{\beta}$
+
+\[ \beta_t = \exp (\boldsymbol{X} \boldsymbol{\beta}) \]
+
+
+
+```{r}
+
+SEIR_code <-  nimbleCode({
+    
+    S[1] <- N - E0 - I0 - R0
+    E[1] <- E0
+    I[1] <- I0
+    R[1] <- R0
+    
+    probEI <- 1 - exp(-rho)
+    probIR <- 1 - exp(-gamma)
+    
+    
+    ### loop over time
+    for(t in 1:tau) {
+        
+        betat[t] <- inprod(beta[1:p], X[t, 1:p])
+        
+        probSE[t] <- 1 - exp(- exp(betat[t]) * I[t] / N)
+        
+        Estar[t] ~ dbin(probSE[t], S[t])
+        Istar[t] ~ dbin(probEI, E[t])
+        Rstar[t] ~ dbin(probIR, I[t])
+        
+        # update S, I, R
+        S[t + 1] <- S[t] - Estar[t]
+        E[t + 1] <- E[t] + Estar[t] - Istar[t]
+        I[t + 1] <- I[t] + Istar[t] - Rstar[t]
+        R[t + 1] <- R[t] + Rstar[t] 
+        
+        # compute R0(t)
+        reproNum[t] <- exp(betat[t]) / gamma
+        
+    }
+    
+    # priors
+    for (i in 1:p) {
+        beta[i] ~ dnorm(0, sd = 4)
+    }
+    gamma ~ dgamma(aa, bb)
+    rho ~ dgamma(cc, dd)
+    
+})
+```
+
+# Specifying priors
+
+Ebola has a latent/incubation period which is 8 to 10 days on average. 
+
+```{r}
+dd <- 5000
+cc <- 1/9 * dd
+pgamma(1/8, cc, dd) - pgamma(1/10, cc, dd)
+curve(dgamma(1/x, cc, dd), from = 5, to = 14, 
+      main = 'prior for mean latent period')
+```
+
+Individuals can only transmit EVD to others after symptoms have appeared, and remain infectious for around 4 to 10 days.
+
+```{r}
+bb <- 2000
+aa <- 1/7 * bb
+pgamma(1/6, aa, bb) - pgamma(1/8, aa, bb)
+curve(dgamma(1/x, aa, bb), from = 1, to = 14, 
+      main = 'prior for mean infectious period')
+
+```
+
+# User-defined proposal for transitions
+
+Proposal function for unobserved transition vectors $E^*$ and $R^*$
+
+```{r}
+transUpdate <- nimbleFunction(
+    name = 'transUpdate',                              
+    contains = sampler_BASE,                     
+    setup = function(model, mvSaved, target, control) { # REQUIRED setup arguments
+        calcNodes <- model$getDependencies(target) 
+        
+        # number of update attempts 
+        nUpdates <- 500
+    },  # setup can't return anything
+    run = function() {
+        currentValue <- model[[target]]                                   
+        currentLogProb <- model$getLogProb(calcNodes)  
+        
+        nTimePoints <- length(currentValue)
+        
+        # repeat proposal many times 
+        for (it in 1:nUpdates) {
+            
+            # three possible moves:
+            moveType <- ceiling(runif(1, 0, 3))
+            
+            proposalValue <- currentValue
+            
+            if (moveType == 1) {
+                # add a removal time
+                addIdx <- runif(1, 1, nTimePoints + 1)
+                proposalValue[addIdx] <- proposalValue[addIdx] + 1
+                
+                # g(old|new) - g(new|old)
+                # subtract from new - add to old
+                possibleSubtract <- which(proposalValue > 0)
+                g <- -log(length(possibleSubtract)) + log(nTimePoints)
+                
+                
+            } else if (moveType == 2) {
+                # move a removal time
+                possibleSubtract <- which(currentValue > 0)
+                subtractIdx <- possibleSubtract[runif(1, 
+                                                      1, length(possibleSubtract) + 1)]
+                addIdx <- runif(1, 1, nTimePoints + 1)
+                
+                proposalValue[subtractIdx] <- proposalValue[subtractIdx] - 1
+                proposalValue[addIdx] <- proposalValue[addIdx] + 1
+                
+                # g(old|new) - g(new|old)
+                # possibly have different number of values to subtract from 
+                newPossibleSubtract <- which(proposalValue > 0)
+                g <- -log(length(newPossibleSubtract)) +log(length(possibleSubtract))
+                
+            } else if (moveType == 3) {
+                # subtract a removal time
+                possibleSubtract <- which(currentValue > 0)
+                subtractIdx <- possibleSubtract[runif(1, 
+                                                      1, length(possibleSubtract) + 1)]
+                proposalValue[subtractIdx] <- proposalValue[subtractIdx] - 1
+                
+                # g(old|new) - g(new|old)
+                # add to new - subtract from old
+                g <- -log(nTimePoints) + log(length(possibleSubtract)) 
+                
+            }
+            
+            # put proposal value in model
+            model[[target]] <<- proposalValue                                
+            proposalLogProb <- model$calculate(calcNodes)                     
+            logAcceptanceRatio <- proposalLogProb - currentLogProb + g            
+            
+            accept <- decide(logAcceptanceRatio)                              
+            
+            if (accept) {
+                # no changes to model object needed
+                currentLogProb <- proposalLogProb
+                currentValue <- proposalValue
+                
+            } else {
+                # reject proposal and revert model to current state
+                model[[target]] <<- currentValue
+                
+                # current full conditional (calculate overwrites the stored value)
+                currentLogProb <- model$calculate(calcNodes) 
+            }
+            
+        } # end loop
+        
+        # synchronize model -> mvSaved after nUpdates
+        copy(from = model, to = mvSaved, row = 1, nodes = calcNodes, logProb = TRUE)
+        
+    },
+    methods = list(    # required method for sampler_BASE base class
+        reset = function() {}
+    )
+)
+```
+
+
+# Model fitting - piecewise constant transmission
+
+To specify piecewise constant transmission, we can specify $\boldsymbol{X}$ as
+
+
+$$\begin{bmatrix}
+1 & 0 & 0\\
+1 & 0 & 0\\
+\vdots & \vdots & \vdots \\
+1 & 1 & 0\\
+1 & 1 & 0\\
+\vdots & \vdots & \vdots \\
+1 & 1 & 1\\
+1 & 1 & 1\\
+\end{bmatrix}
+\begin{matrix}
+t = 1 \\
+2 \\
+\vdots \\
+t_1^* \\
+\\
+\vdots \\
+t_2^* \\
+\\
+\end{matrix}$$
+
+so that,
+\[ \beta_t = \exp (\boldsymbol{X} \boldsymbol{\beta}) = \begin{cases} 
+\exp(\beta_0) &  t < t_1^* \\
+\exp(\beta_0 + \beta_1)& t_1^* \leq t < t_2^* \\
+\exp(\beta_0 + \beta_1 + \beta_2) &  t \geq t_2^* 
+\end{cases}
+\]
+
+```{r}
+dataList <- list(Istar = ebola$cases[-1])
+
+tau <- length(dataList$Istar)
+tstar1 <- which(ebola$date == as.Date('2014-10-01')) - 1
+tstar2 <- which(ebola$date == as.Date('2014-12-28')) - 1
+X <- cbind(1, 1:tau >= tstar1, 1:tau >= tstar2)
+
+constantsList <- list(N = 7092113,
+                      E0 = sum(dataList$Istar[c(1:9)]),
+                      I0 = ebola$cases[1],
+                      R0 = 0,
+                      tau = tau,
+                      X = X,
+                      p = ncol(X),
+                      aa = aa,
+                      bb = bb,
+                      cc = cc,
+                      dd = dd) 
+
+set.seed(2)
+# initially assume exposed 9 days before infection and removed 7 days after
+initsList <- list(beta = rnorm(ncol(X), 0, 2),
+                  gamma = rgamma(1, aa, bb),
+                  rho = rgamma(1, cc, dd),
+                  Estar = c(dataList$Istar[-c(1:9)], 
+                            rep(0, 9)), 
+                  Rstar = c(rep(0, 6), constantsList$I0,
+                            dataList$Istar[1:(tau-7)]))
+
+
+seirModel1 <- nimbleModel(SEIR_code, 
+                          constants = constantsList,
+                          data = dataList,
+                          inits = initsList)
+
+
+myConfig1 <- configureMCMC(seirModel1)
+
+myConfig1$removeSamplers('Estar') # Nodes will be expanded
+myConfig1$addSampler(target = c('Estar'),
+                     type = "transUpdate")
+myConfig1$addMonitors(c('Estar'))
+
+myConfig1$removeSamplers('Rstar') # Nodes will be expanded
+myConfig1$addSampler(target = c('Rstar'),
+                     type = "transUpdate")
+myConfig1$addMonitors(c('Rstar'))
+
+myConfig1$addMonitors(c('reproNum'))
+myConfig1
+
+
+nimbleOptions(MCMCusePredictiveDependenciesInCalculations = TRUE)
+myMCMC1 <- buildMCMC(myConfig1)
+compiled1 <- compileNimble(seirModel1, myMCMC1) 
+
+```
+
+The code to fit the model takes about 5 hours to run, so I don't recommend running it live. For the purposes of the workshop, I've saved the output in 'DATA/ebolaSamples1.rds'.
+
+```{r, eval = F}
+samples1 <- runMCMC(compiled1$myMCMC1, niter = 60000, nburnin = 10000, setSeed = 1)
+```
+
+```{r, eval = F, echo = F}
+# thin before storage so can be uploaded to github
+samples1 <- samples1[seq(1, 50000, 100),]
+saveRDS(samples1, './DATA/ebolaSamples1.rds')
+```
+
+
+```{r, echo = F}
+samples1 <- readRDS('./DATA/ebolaSamples1.rds')
+```
+
+# Model fitting - flexible transmission with splines
+
+For flexible transmission modeling, let $\boldsymbol{X}$ be a basis matrix spanning the range of time in the data.
+
+```{r}
+# dataList doesn't change 
+
+X <- splines::bs(1:tau, Boundary.knots = c(-50, tau), 
+                 knots = c(tstar1, tstar2))
+
+constantsList <- list(N = 7092113,
+                      E0 = sum(dataList$Istar[c(1:9)]),
+                      I0 = ebola$cases[1],
+                      R0 = 0,
+                      tau = tau,
+                      X = X,
+                      p = ncol(X),
+                      aa = aa,
+                      bb = bb,
+                      cc = cc,
+                      dd = dd) 
+
+set.seed(2)
+# initially assume exposed 9 days before infection and removed 7 days after
+initsList <- list(beta = rnorm(ncol(X), 0, 2),
+                  gamma = rgamma(1, aa, bb),
+                  rho = rgamma(1, cc, dd),
+                  Estar = c(dataList$Istar[-c(1:9)], 
+                            rep(0, 9)), 
+                  Rstar = c(rep(0, 6), constantsList$I0,
+                            dataList$Istar[1:(tau-7)]))
+
+seirModel2 <- nimbleModel(SEIR_code, 
+                          constants = constantsList,
+                          data = dataList,
+                          inits = initsList)
+
+
+myConfig2 <- configureMCMC(seirModel2)
+
+myConfig2$removeSamplers('Estar') # Nodes will be expanded
+myConfig2$addSampler(target = c('Estar'),
+                     type = "transUpdate")
+myConfig2$addMonitors(c('Estar'))
+
+myConfig2$removeSamplers('Rstar') # Nodes will be expanded
+myConfig2$addSampler(target = c('Rstar'),
+                     type = "transUpdate")
+myConfig2$addMonitors(c('Rstar'))
+
+
+myConfig2$addMonitors(c('reproNum'))
+myConfig2
+
+nimbleOptions(MCMCusePredictiveDependenciesInCalculations = TRUE)
+myMCMC2 <- buildMCMC(myConfig2)
+compiled2 <- compileNimble(seirModel2, myMCMC2) 
+
+```
+
+The code to fit the model takes about 5 hours to run, so I don't recommend running it live. For the purposes of the workshop, I've saved the output in 'DATA/ebolaSamples2.rds'.
+
+```{r, eval = F}
+samples2 <- runMCMC(compiled2$myMCMC2, niter = 60000, nburnin = 10000, setSeed = 1)
+```
+
+```{r, eval = F, echo = F}
+# thin before storage so can be uploaded to github
+samples2 <- samples2[seq(1, 50000, 100),]
+saveRDS(samples2, './DATA/ebolaSamples2.rds')
+```
+
+
+```{r, echo = F}
+samples2 <- readRDS('./DATA/ebolaSamples2.rds')
+```
+
+# Trace plots for model parameters
+
+## Model 1 - piecewise transmission
+
+```{r}
+par(mfrow = c(2,3))
+plot(samples1[,'beta[1]'], type = 'l')
+plot(samples1[,'beta[2]'], type = 'l')
+plot(samples1[,'beta[3]'], type = 'l')
+plot(samples1[,'rho'], type = 'l')
+plot(samples1[,'gamma'], type = 'l')
+```
+
+
+## Model 2 - flexible transmission
+
+```{r}
+par(mfrow = c(2,4))
+plot(samples2[,'beta[1]'], type = 'l')
+plot(samples2[,'beta[2]'], type = 'l')
+plot(samples2[,'beta[3]'], type = 'l')
+plot(samples2[,'beta[4]'], type = 'l')
+plot(samples2[,'beta[5]'], type = 'l')
+plot(samples2[,'rho'], type = 'l')
+plot(samples2[,'gamma'], type = 'l')
+```
+
+# Posterior distribution of exposure and removal times
+
+## Model 1 - piecewise transmission
+
+```{r}
+EstarSamples <- samples1[,grep('Estar', colnames(samples1))]
+EstarMean <- colMeans(EstarSamples)
+EstarCI <- apply(EstarSamples, 2, quantile, probs = c(0.025, 0.975))
+
+RstarSamples <- samples1[,grep('Rstar', colnames(samples1))]
+RstarMean <- colMeans(RstarSamples)
+RstarCI <- apply(RstarSamples, 2, quantile, probs = c(0.025, 0.975))
+
+transSummary <- data.frame(date = ebola$date_of_onset[-1], 
+                           meanE = EstarMean,
+                           lowerE = EstarCI[1,],
+                           upperE = EstarCI[2,], 
+                           meanR = RstarMean,
+                           lowerR = RstarCI[1,],
+                           upperR = RstarCI[2,])
+
+ggplot(transSummary, aes(x = date, y = meanE, ymin = lowerE, ymax = upperE)) +
+    geom_line(color = 'blue', linewidth = 1) + 
+    geom_ribbon(fill = 'deepskyblue', alpha = 0.3) + 
+    theme_bw() +
+    ggtitle('Estimated exposure times')
+
+
+ggplot(transSummary, aes(x = date, y = meanR, ymin = lowerR, ymax = upperR)) +
+    geom_line(color = 'blue', linewidth = 1) + 
+    geom_ribbon(fill = 'deepskyblue', alpha = 0.3) + 
+    theme_bw() +
+    ggtitle('Estimated removal times')
+```
+
+## Model 2 - flexible transmission
+
+```{r}
+EstarSamples <- samples2[,grep('Estar', colnames(samples2))]
+EstarMean <- colMeans(EstarSamples)
+EstarCI <- apply(EstarSamples, 2, quantile, probs = c(0.025, 0.975))
+
+RstarSamples <- samples2[,grep('Rstar', colnames(samples2))]
+RstarMean <- colMeans(RstarSamples)
+RstarCI <- apply(RstarSamples, 2, quantile, probs = c(0.025, 0.975))
+
+transSummary <- data.frame(date = ebola$date_of_onset[-1], 
+                           meanE = EstarMean,
+                           lowerE = EstarCI[1,],
+                           upperE = EstarCI[2,], 
+                           meanR = RstarMean,
+                           lowerR = RstarCI[1,],
+                           upperR = RstarCI[2,])
+
+ggplot(transSummary, aes(x = date, y = meanE, ymin = lowerE, ymax = upperE)) +
+    geom_line(color = 'blue', linewidth = 1) + 
+    geom_ribbon(fill = 'deepskyblue', alpha = 0.3) + 
+    theme_bw() +
+    ggtitle('Estimated exposure times')
+
+
+ggplot(transSummary, aes(x = date, y = meanR, ymin = lowerR, ymax = upperR)) +
+    geom_line(color = 'blue', linewidth = 1) + 
+    geom_ribbon(fill = 'deepskyblue', alpha = 0.3) + 
+    theme_bw() +
+    ggtitle('Estimated removal times')
+```
+
+
+# Posteriors for mean latent and infectious periods
+
+## Model 1 - piecewise transmission
+
+Histogram of posterior compared to prior distribution (red)
+
+```{r, fig.width = 10}
+par(mfrow = c(1,2))
+hist(1/samples1[,'rho'], freq = F, xlim = c(4, 14))
+x <- 1/rgamma(1e6, cc, dd)
+dx <- density(x)
+lines(dx, col = "red")
+
+hist(1/samples1[,'gamma'], freq = F, xlim = c(0, 14))
+x <- 1/rgamma(1e6, aa, bb)
+dx <- density(x)
+lines(dx, col = "red")
+```
+
+## Model 2 - flexible transmission
+
+Histogram of posterior compared to prior distribution (red)
+
+```{r, fig.width = 10}
+par(mfrow = c(1,2))
+hist(1/samples2[,'rho'], freq = F, xlim = c(4, 14))
+x <- 1/rgamma(1e6, cc, dd)
+dx <- density(x)
+lines(dx, col = "red")
+
+hist(1/samples2[,'gamma'], freq = F, xlim = c(0, 14))
+x <- 1/rgamma(1e6, aa, bb)
+dx <- density(x)
+lines(dx, col = "red")
+```
+
+
+# Reproductive numbers over time
+
+Posterior mean and 95% credible intervals.
+
+```{r}
+# model 1 R0
+r0Samples1 <- samples1[,grep('reproNum', colnames(samples1))]
+r0Mean1 <- colMeans(r0Samples1)
+r0CI1 <- apply(r0Samples1, 2, quantile, probs = c(0.025, 0.975))
+
+# model 2 R0
+r0Samples2 <- samples2[,grep('reproNum', colnames(samples2))]
+r0Mean2 <- colMeans(r0Samples2)
+r0CI2 <- apply(r0Samples2, 2, quantile, probs = c(0.025, 0.975))
+
+
+r0Summary <- data.frame(date = ebola$date_of_onset[-1], 
+                        model = rep(c('piecewise', 'flexible'),
+                                    each = length(r0Mean1)),
+                        mean = c(r0Mean1, r0Mean2),
+                        lower = c(r0CI1[1,], r0CI2[1,]),
+                        upper = c(r0CI1[2,], r0CI2[2,]))
+
+ggplot(r0Summary, aes(x = date, y = mean, ymin = lower, ymax = upper,
+                      color = model, fill = model)) +
+    geom_line(linewidth = 1) + 
+    geom_ribbon(alpha = 0.3) + 
+    theme_bw() +
+    geom_hline(yintercept = 1, linetype = 2) +
+    ggtitle('Sierra Leone reproductive number over time')
+
+```
+
+Previous research found the reproductive number in Sierra Leone to be 
+
+* around 1.2 or 1.3 https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4169299/ 
+
+* 1.4 or 1.5 https://idpjournal.biomedcentral.com/articles/10.1186/s40249-015-0043-3#Sec9
+
+* 1.70 (interquartile range: 1.34, 2.05) https://www.cambridge.org/core/journals/epidemiology-and-infection/article/systematic-review-of-early-modelling-studies-of-ebola-virus-disease-in-west-africa/154353B9A815326FE3656046AD6390B6
+
+
+# Posterior Prediction to Assess Intervention Effect
+
+```{r}
+# function to simulate from model
+simulator <- nimbleFunction(
+    setup = function(model, dataNodes) {
+        parentNodes <- model$getParents(dataNodes, stochOnly = TRUE)
+        # exclude data from parent nodes
+        parentNodes <- parentNodes[-which(parentNodes %in% dataNodes)]
+        parentNodes <- model$expandNodeNames(parentNodes, 
+                                             returnScalarComponents = TRUE)
+        cat("Stochastic parents of data are: ", paste(parentNodes, sep = ','), ".\n")
+        simNodes <- model$getDependencies(parentNodes, self = FALSE,
+                                          downstream = T)
+        
+        nData <- length(model$expandNodeNames(dataNodes, 
+                                              returnScalarComponents = TRUE))
+    },
+    run = function(params = double(1), nSim = double()) {
+        simDat <- matrix(nrow = nSim, ncol = nData)   
+        for(i in 1:nSim) {
+            values(model, parentNodes) <<- params
+            model$simulate(simNodes, includeData = TRUE)
+            simDat[i, ] <- values(model, dataNodes)
+        }
+        return(simDat)
+        returnType(double(2))
+    })
+
+
+# prediction range is post intervention 1
+dataNodes <- c(paste0('Estar[', tstar1:tau, ']'),
+               paste0('Istar[', tstar1:tau, ']'),
+               paste0('Rstar[', tstar1:tau, ']'))
+
+sim_R <- simulator(seirModel1, dataNodes)
+sim_C <- compileNimble(sim_R)
+
+# get order of parameters
+parentNodes <- seirModel1$getParents(dataNodes, stochOnly = TRUE)
+parentNodes <- parentNodes[-which(parentNodes %in% dataNodes)]
+parentNodes <- seirModel1$expandNodeNames(parentNodes, returnScalarComponents = TRUE)
+
+obsIstar <- seirModel1$Istar[1:(tstar1 - 1)]
+names(obsIstar) <- paste0('Istar[', 1:(tstar1 - 1), ']')
+```
+
+
+If control measures were never introduced
+
+```{r}
+nPost <- 10000
+postPredInc <- matrix(NA, nrow = length( tstar1:tau), ncol = nPost)
+set.seed(1)
+for (k in 1:nPost) {
+    
+    postIdx <- sample(1:nrow(samples1), 1)
+    
+    EstarSample_post <- EstarSamples[postIdx,]
+    RstarSample_post <- RstarSamples[postIdx,]
+    paramsSample_post <- c(samples1[postIdx, 'beta[1]'],
+                           'beta[2]' = 0,
+                           'beta[3]' = 0,
+                           samples1[postIdx,'rho'],
+                           samples1[postIdx,'gamma'])
+    
+    allSamples <- c(paramsSample_post, EstarSample_post, 
+                    obsIstar, RstarSample_post)
+    allSamples <- allSamples[parentNodes]
+    
+    tmp <- sim_C$run(params = allSamples, nSim = 10)
+    predInc <- tmp[,grep('Istar', dataNodes)]
+    postPredInc[,k] <- apply(predInc, 2, median)
+}
+
+```
+
+
+
+```{r}
+postPredMean <- rowMeans(postPredInc)
+postPredCI <- apply(postPredInc, 1, quantile, probs = c(0.025, 0.975))
+
+ebola$time <- 0:tau
+postPredDat <- data.frame(time =tstar1:tau, 
+                          mean = postPredMean,
+                          lower = postPredCI[1,],
+                          upper = postPredCI[2,])
+postPredDat <- merge(ebola, postPredDat, by = 'time', all.x = T)
+
+
+ggplot(postPredDat, aes(x = date_of_onset, y = mean, ymin = lower, ymax = upper)) +
+    geom_line(col= 'red') + 
+    geom_line(aes(y = cases)) + 
+    geom_ribbon(fill = 'red', alpha = 0.3) + 
+    theme_bw() +
+    labs(y = 'New cases', x= 'Date') +
+    xlim(as.Date('2014-05-18'),
+         ebola$date_of_onset[which(ebola$time == tstar1 + 50)]) +
+    ylim(0, 350)
+
+
+ggplot(postPredDat, aes(x = date_of_onset, y = mean, ymin = lower, ymax = upper)) +
+    geom_line(col= 'red') + 
+    geom_line(aes(y = cases)) + 
+    geom_ribbon(fill = 'red', alpha = 0.3) + 
+    theme_bw() +
+    labs(y = 'New cases', x= 'Date') 
+```
+
+```{r}
+sum(postPredMean)
+sum(dataList$Istar[tstar1:tau])
+
+sum(postPredMean) - sum(dataList$Istar[tstar1:tau])
+```
+
+Without control measures, we would expect ~3.2 million more people would have 
+contracted EVD during the study period
+
+# Less Effective Control Measures
+
+If control measures never achieved 100% case isolation and safe burials.
+
+```{r}
+# prediction range is post intervention 1
+dataNodes <- c(paste0('Estar[', tstar2:tau, ']'),
+               paste0('Istar[', tstar2:tau, ']'),
+               paste0('Rstar[', tstar2:tau, ']'))
+
+sim_R <- simulator(seirModel1, dataNodes)
+sim_C <- compileNimble(sim_R)
+
+# get order of parameters
+parentNodes <- seirModel1$getParents(dataNodes, stochOnly = TRUE)
+parentNodes <- parentNodes[-which(parentNodes %in% dataNodes)]
+parentNodes <- seirModel1$expandNodeNames(parentNodes, returnScalarComponents = TRUE)
+
+obsIstar <- seirModel1$Istar[1:(tstar2 - 1)]
+names(obsIstar) <- paste0('Istar[', 1:(tstar2 - 1), ']')
+
+nPost <- 10000
+postPredInc <- matrix(NA, nrow = length( tstar2:tau), ncol = nPost)
+set.seed(1)
+for (k in 1:nPost) {
+    
+    postIdx <- sample(1:nrow(samples1), 1)
+    
+    EstarSample_post <- EstarSamples[postIdx,]
+    RstarSample_post <- RstarSamples[postIdx,]
+    paramsSample_post <- c(samples1[postIdx, 'beta[1]'],
+                           samples1[postIdx, 'beta[2]'],
+                           'beta[3]' = 0,
+                           samples1[postIdx,'rho'],
+                           samples1[postIdx,'gamma'])
+    
+    allSamples <- c(paramsSample_post, EstarSample_post, 
+                    obsIstar, RstarSample_post)
+    allSamples <- allSamples[parentNodes]
+    
+    tmp <- sim_C$run(params = allSamples, nSim = 10)
+    predInc <- tmp[,grep('Istar', dataNodes)]
+    postPredInc[,k] <- apply(predInc, 2, median)
+}
+
+```
+
+
+```{r}
+postPredMean <- rowMeans(postPredInc)
+postPredCI <- apply(postPredInc, 1, quantile, probs = c(0.025, 0.975))
+
+postPredDat <- data.frame(time =tstar2:tau, 
+                          mean = postPredMean,
+                          lower = postPredCI[1,],
+                          upper = postPredCI[2,])
+postPredDat <- merge(ebola, postPredDat, by = 'time', all.x = T)
+
+ggplot(postPredDat, aes(x = date_of_onset, y = mean, ymin = lower, ymax = upper)) +
+    geom_line(col= 'red') + 
+    geom_line(aes(y = cases)) + 
+    geom_ribbon(fill = 'red', alpha = 0.3) + 
+    theme_bw() +
+    labs(y = 'New cases', x= 'Date') 
+
+```
+
+```{r}
+sum(postPredMean)
+sum(dataList$Istar[tstar2:tau])
+
+sum(postPredMean) - sum(dataList$Istar[tstar2:tau])
+```
+
+Without achieving 100% case isolation and safe burials, we expect 
+~6,000 more people would have contracted EVD during the study period.
+
+
+
+

@@ -1,0 +1,377 @@
+---
+title: "Bayesian Inference with NIMBLE"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+# Simple linear regression in NIMBLE
+
+```{r}
+library(nimble)
+```
+
+# Simulate data
+
+\begin{align*}
+y_i \sim N(\beta_0 + \beta_1 x_i, \sigma^2)
+\end{align*}
+
+```{r}
+set.seed(1)
+n <- 100
+x <- runif(n)
+b0_true <- 0.3
+b1_true <- 0.5
+sigma_true <- 0.25
+y <- rnorm(n, b0_true + b1_true*x, sigma_true)
+
+plot(x, y)
+```
+
+
+# NIMBLE model syntax
+
+```{r}
+lmCode <- nimbleCode({
+    
+    # likelihood
+    for(i in 1:n) {
+        mu[i] <- b0 + b1*x[i] 
+        y[i] ~ dnorm(mu[i], sd = sigma)
+    }
+    
+    # priors
+    b0 ~ dnorm(0, sd = 100)
+    b1 ~ dnorm(0, sd = 100)
+    sigma ~ dunif(0, 100)
+    
+})
+```
+
+# Sampling from the posterior (easy method)
+
+After writing the model, we can obtain samples from the posterior. The most 
+straightforward method for this is to use the nimbleMCMC function. This uses
+the default MCMC algorithm.
+
+```{r}
+dataList <- list(y = y)
+constantsList <- list(n = n, x = x)
+initsList <- list(b0 = 1, b1 = 0, sigma = 1)
+
+system.time({
+    samples <- nimbleMCMC(lmCode,
+                          data = dataList, 
+                          constants = constantsList,
+                          inits = initsList,
+                          niter = 10000)
+})
+
+
+head(samples)
+
+par(mfrow = c(1,3))
+plot(samples[,'b0'], type = 'l')
+abline(h = b0_true, col = 'red')
+plot(samples[,'b1'], type = 'l')
+abline(h = b1_true, col = 'red')
+plot(samples[,'sigma'], type = 'l')
+abline(h = sigma_true, col = 'red')
+```
+
+
+# Sampling from the posterior (customizable method)
+
+We can also obtain samples using a longer method which provides the ability to 
+customize the MCMC algorithm. Using this method, there are 5 steps:
+
+1. Build the nimbleModel object
+
+```{r}
+### create nimble model object
+lmModel <- nimbleModel(lmCode, 
+                       data = dataList, 
+                       constants = constantsList,
+                       inits = initsList)
+```
+
+
+2. Create the MCMC configuration object
+
+```{r}
+lmConfigure <- configureMCMC(lmModel)
+```
+
+3. Build the MCMC object from the configuration
+
+```{r}
+lmMCMC <- buildMCMC(lmConfigure)
+```
+
+4. Compile the model and MCMC in C++
+
+```{r}
+lmCompiled <- compileNimble(lmModel, lmMCMC) 
+```
+
+5. Run the MCMC to obtain samples
+
+```{r}
+samples2 <- runMCMC(lmCompiled$lmMCMC, niter = 10000)
+
+head(samples2)
+
+par(mfrow = c(1,3))
+plot(samples2[,'b0'], type = 'l')
+abline(h = b0_true, col = 'red')
+plot(samples2[,'b1'], type = 'l')
+abline(h = b1_true, col = 'red')
+plot(samples2[,'sigma'], type = 'l')
+abline(h = sigma_true, col = 'red')
+```
+
+# Customizing the MCMC
+
+Using the customizable method, we can customize the MCMC. For example, we could use a slice
+sampler instead of a random walk sampler for sigma.
+
+```{r}
+lmConfigure$removeSamplers('sigma')
+lmConfigure$addSampler('sigma',
+                       type = 'slice')
+
+lmConfigure
+
+lmMCMC <- buildMCMC(lmConfigure)
+
+lmCompiled <- compileNimble(lmModel, lmMCMC) 
+
+samples3 <- runMCMC(lmCompiled$lmMCMC, niter = 10000)
+
+head(samples3)
+
+par(mfrow = c(1,3))
+plot(samples3[,'b0'], type = 'l')
+abline(h = b0_true, col = 'red')
+plot(samples3[,'b1'], type = 'l')
+abline(h = b1_true, col = 'red')
+plot(samples3[,'sigma'], type = 'l')
+abline(h = sigma_true, col = 'red')
+```
+
+
+
+# nimbleModels are objects
+
+
+The nimbleModel object contains the current state of the model parameters.
+
+```{r}
+lmModel$b0
+lmModel$b1
+lmModel$sigma
+```
+
+nimbleModel objects also contain methods (functions). The calculate() and 
+getLogProb() methods calculate the log posterior for the current state of the model.
+
+```{r}
+lmModel$getLogProb()
+
+lmModel$calculate()
+
+sum(dnorm(y, mean = lmModel$b0 + lmModel$b1*x, sd = lmModel$sigma, log = T)) +
+    dnorm(lmModel$b0, 0, 100, log = T) + 
+    dnorm(lmModel$b1, 0, 100, log = T) +
+    dunif(lmModel$sigma, 0, 100, log = T)
+```
+
+When calculate() is called, the stored value of the model is updated (if parameter values have changed),
+while getLogProb() simply returns the cached value.
+
+```{r}
+lmModel$b0
+lmModel$b0 <- 2
+
+lmModel$getLogProb()
+lmModel$calculate()
+lmModel$getLogProb()
+```
+
+Another useful method is getDependencies(), which returns all nodes that are 
+dependent on the input argument.
+
+```{r}
+lmModel$getDependencies('b0')
+```
+
+We can combine getDependencies() and getLogProb() to easily find the full 
+conditional of a specified parameter.
+
+```{r}
+depNodes <- lmModel$getDependencies('b0')
+lmModel$getLogProb(depNodes)
+
+sum(dnorm(lmModel$y, mean = lmModel$b0 + lmModel$b1*x, sd = lmModel$sigma, log = T)) +
+    dnorm(lmModel$b0, 0, 100, log = T)
+```
+
+
+# Writing a custom sampler
+
+We can use these methods to write a custom sampler function.
+
+For example, we could create an independence sampler for sigma, where each proposed 
+value is a random draw from the prior a Uniform(0, 100) distribution.
+
+```{r}
+indSampler <- nimbleFunction(
+    name = 'indSampler',                         # Convenient for class name of R reference class and generated C++ class
+    contains = sampler_BASE,                     # There is a simple class inheritance system.
+    setup = function(model, mvSaved, target, control) {                 # REQUIRED setup arguments
+        scale <- if(!is.null(control$scale)) control$scale else 1         # Typical extraction of control choices
+        calcNodes <- model$getDependencies(target)                        # Typical query of model structure
+    },                                                                  # setup can't return anything
+    run = function() {
+        currentValue <- model[[target]]                                   # extract current value
+        currentLogProb <- model$getLogProb(calcNodes)                     # get log "denominator" from cached values
+        
+        proposalValue <- runif(1, 0, 100)        # generate proposal value
+        
+        model[[target]] <<- proposalValue                                 # put proposal value in model
+        proposalLogProb <- model$calculate(calcNodes)                     # calculate log "numerator" 
+        logAcceptanceRatio <- proposalLogProb - currentLogProb            # log acceptance ratio
+        
+        accept <- decide(logAcceptanceRatio)                              # utility function to generate accept/reject decision
+        if(accept)                                                        # accept: synchronize model -> mvSaved
+            copy(from = model, to = mvSaved, row = 1, nodes = calcNodes, logProb = TRUE)
+        else                                                              # reject: synchronize mvSaved -> model
+            copy(from = mvSaved, to = model, row = 1, nodes = calcNodes, logProb = TRUE)
+    },
+    methods = list(                              # required method for sampler_BASE base class
+        reset = function() {}
+    )
+)
+```
+
+
+Then we can modify our MCMC configuration to use this sampler
+
+```{r}
+lmConfigure$removeSamplers('sigma')
+lmConfigure$addSampler('sigma',
+                       type = 'indSampler')
+
+lmConfigure
+
+lmMCMC <- buildMCMC(lmConfigure)
+
+lmCompiled <- compileNimble(lmModel, lmMCMC) 
+
+samples4 <- runMCMC(lmCompiled$lmMCMC, 
+                    niter = 100000,
+                    nburnin = 10000)
+
+head(samples4)
+
+par(mfrow = c(1,3))
+plot(samples4[,'b0'], type = 'l')
+abline(h = b0_true, col = 'red')
+plot(samples4[,'b1'], type = 'l')
+abline(h = b1_true, col = 'red')
+plot(samples4[,'sigma'], type = 'l')
+abline(h = sigma_true, col = 'red')
+```
+
+
+This is a very inefficient sampler.
+
+# Simulating from a NIMBLE model
+
+We can also use nimble models to simulate data. This is useful for simulation
+studies and posterior prediction.
+
+```{r}
+### create nimble model object without data or initial values
+lmModelSim <- nimbleModel(lmCode, 
+                          constants = constantsList)
+
+# exclude data from parent nodes
+parentNodes <- lmModelSim$getParents('y', stochOnly = TRUE)
+nodesToSim <- lmModelSim$getDependencies(parentNodes, self = FALSE,downstream = T)
+
+lmModelSim$b0 <- b0_true
+lmModelSim$b1 <- b1_true
+lmModelSim$sigma <- sigma_true
+
+nSim <- 500
+
+system.time({
+    simDat <- matrix(NA, nrow = constantsList$n, ncol = nSim)
+    for (i in 1:nSim) {
+        lmModelSim$simulate(nodesToSim, includeData = TRUE)
+        simDat[,i] <- lmModelSim$y
+    }
+})
+
+
+par(mfrow = c(2,2)) 
+for (i in 1:4) {
+    plot(constantsList$x, simDat[,i])
+}
+
+
+```
+
+Writing all of this into a function which can be compiled in C++ yields incredibly
+fast run times.
+
+```{r}
+# function to simulate from model
+simulator <- nimbleFunction(
+  setup = function(model, dataNodes) {
+      
+    parentNodes <- model$getParents(dataNodes, stochOnly = TRUE)
+    nodesToSim <- model$getDependencies(parentNodes, self = FALSE,downstream = T)
+
+    nData <- length(model$expandNodeNames(dataNodes, returnScalarComponents = TRUE))
+  },
+  run = function(nSim = double(0)) {
+    simDat <- matrix(nrow = nData, ncol = nSim)   
+    for(i in 1:nSim) {
+      model$simulate(nodesToSim, includeData = TRUE)
+      simDat[, i] <- values(model, dataNodes)
+    }
+    return(simDat)
+    returnType(double(2))
+  })
+
+
+compiled <- compileNimble(lmModelSim)
+
+sim_R <- simulator(model= lmModelSim, dataNodes = 'y')
+sim_C <- compileNimble(sim_R)
+
+nSim <- 10000
+
+system.time({
+   simDat <- sim_C$run(nSim)
+})
+
+par(mfrow = c(2,2)) 
+for (i in 1:4) {
+    plot(constantsList$x, simDat[,i])
+}
+
+```
+
+
+
+
+
+
+

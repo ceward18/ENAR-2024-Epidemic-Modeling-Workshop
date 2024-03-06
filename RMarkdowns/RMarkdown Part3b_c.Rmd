@@ -1,0 +1,87 @@
+---
+title: "Fitting Spatial ILM to Data with <br> Covariates and Sparks Term <br> (SI Version)"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+#  Spatial SI ILM  with Covariates and Sparks Term
+
+```{r}
+library(EpiILM)
+```
+
+
+
+
+# Read in data
+
+```{r, include=TRUE}
+dat = read.table('DATA/ENAR_spatialepidemic.csv',header=T, sep=',')
+dat
+```
+
+# Form epidata object for analysis
+
+```{r, include=TRUE}
+epidat =as.epidata(type = "SI", n = 100, x=dat$x, y = dat$y, inftime = dat$inftime)
+epidat
+```
+
+
+
+#  Spatial Model with Covariate: <br> Run MCMC for 30000 iterations
+
+```{r, include=TRUE}
+mcmcout3 <- epimcmc(epidat,  tmax = max(epidat$inftime), niter=30000,
+                   sus.par.ini=c(0.2, 0.2),  beta.ini=5.0, spark.ini = 0.0001,
+                   adapt=TRUE, Sformula = ~dat$XA,
+                   pro.sus.var = c(0.2, 0.1), pro.beta.var = 1.0, pro.spark.var = 0.01,
+                   prior.sus.dist=c("uniform", "uniform"), 
+                   prior.sus.par=matrix(c(0,0,10000,10000), ncol = 2, nrow = 2),
+                   prior.beta.dist="uniform", 
+                   prior.beta.par =c(0,10000),
+                   prior.spark.dist = "uniform", prior.spark.par = c(0, 10000), acc.rate = 0.5)
+```
+
+
+```{r, include=TRUE}
+plot(mcmcout3, partype = "parameter", start = 1, density = FALSE)
+```
+
+
+Trace plots with posterior density <br> (removed burn-in)
+
+```{r, include=TRUE}
+plot(mcmcout3, partype = "parameter", start = 10000, density = TRUE)
+```
+
+
+# Summary of posterior statistics
+```{r, include=TRUE}
+summary(mcmcout3, start = 10000)
+```
+
+
+
+# Calculate DIC
+
+```{r}
+sus.parameters = c( mean(unlist(mcmcout3$Estimates[10000:30000,1])), mean(unlist(mcmcout3$Estimates[10000:30000,2])))
+beta.par = mean(unlist(mcmcout3$Estimates[10000:30000,3]))
+spark.par =  mean(unlist(mcmcout3$Estimates[10000:30000,4]))
+
+loglike <- epilike(epidat, tmax = max(epidat$inftime), Sformula = ~dat$XA, sus.par = sus.parameters,
+                     beta = beta.par, spark = spark.par)
+
+dic <- epidic(burnin = 10000, niter = 30000, LLchain = mcmcout3$Loglikelihood,
+                LLpostmean = loglike)
+
+dic
+```
+
+
+

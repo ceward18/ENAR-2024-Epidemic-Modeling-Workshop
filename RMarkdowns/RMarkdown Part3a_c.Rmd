@@ -1,0 +1,104 @@
+---
+title: "Simulation from a  <br>  Network-based SI Model <br> (Undirected and Unweighted)"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+# Simple Spatial SI ILM
+
+```{r}
+library(EpiILM)
+library("igraph")
+```
+
+
+
+
+# Read in contact network data
+
+```{r, include=TRUE}
+contact_mat = matrix(scan("DATA/ISBA_network.csv", what=numeric(), sep=","), nrow=100)
+net1 = graph_from_adjacency_matrix(contact_mat)
+plot (net1, vertex.size = 7, vertex.label.cex = 0.5, edge.arrow.mode = "-")
+```
+
+
+
+# Simulation Epidemic Through Population
+
+```{r, include=TRUE}
+SI.net <- epidata( type="SI", n=100, tmax=25, sus.par=0.1, spark = 0.0, contact=contact_mat)
+```
+
+
+```{r}
+SI.net
+```
+
+
+
+# Epidemic Plots 
+
+
+```{r}
+plot(SI.net, plottype = "curve", curvetype ="complete")
+```
+
+
+
+
+
+
+# Multiple Epidemics
+
+Let’s repeat the epidemic simulation 20 times 
+
+Choose initial infection to be individual 10 at time point 3
+
+```{r}
+inftime <- rep(0,100)
+inftime[10] <- 3
+
+out1 <- vector(mode = "list", length = 20)
+for (i in 1:20){
+    dat <- epidata( type="SI", n=100, tmax=50, sus.par=0.1, spark = 0.0, contact=contact_mat)
+    out1[[i]] <- dat$inftime }
+```
+
+
+
+
+Calculate the number of new infections at each time point
+```{r}
+infect1 <- vector(mode = "list", length = 20)
+for (j in 1:20){
+    newinf <- rep(0)
+     for (i in 1:50){
+     newinf[i] <- length(out1[[j]][out1[[j]]==i]) }
+     infect1[[j]] <- newinf }
+```
+
+#
+
+Plot this:
+
+```{r}
+infectmax <- vector(mode = "list", length = 20)
+  for (j in 1:20){ infectmax[[j]]=max(infect1[[j]] ) }
+  infectmax <- unlist(infectmax)
+  max1 <- max(infectmax)
+
+  plot(seq(1:50),infect1[[1]],type="b",pch=20,lwd=2,
+    xaxt="n",xlab="time ",ylab="New infections",ylim=c(0,max1))
+  axis(1, at=1:50)
+  for (j in 2:20){
+    lines(seq(1:50),infect1[[j]],type="b",pch=20,lwd=2,
+    xaxt="n",xlab="",yaxt="n",ylab="") }
+  
+```
+  
+

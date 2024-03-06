@@ -1,0 +1,281 @@
+---
+title: "Bayesian SIR Model"
+output: slidy_presentation
+---
+
+# Writing the SIR model
+
+```{r}
+library(nimble)
+```
+
+
+```{r}
+SIR_code <-  nimbleCode({
+    
+    S[1] <- N - I0 - R0
+    I[1] <- I0
+    R[1] <- R0
+    
+    probIR <- 1 - exp(-gamma)
+    
+    ### loop over time
+    for(t in 1:tau) {
+        
+        probSI[t] <- 1 - exp(- beta * I[t] / N)
+        
+        Istar[t] ~ dbin(probSI[t], S[t])
+        Rstar[t] ~ dbin(probIR, I[t])
+        
+        # update S, I, R
+        S[t + 1] <- S[t] - Istar[t]
+        I[t + 1] <- I[t] + Istar[t] - Rstar[t]
+        R[t + 1] <- R[t] + Rstar[t] 
+        
+    }
+    
+    # priors
+    beta ~ dgamma(0.1, 0.1)
+    gamma ~ dgamma(aa, bb)
+    
+})
+```
+
+
+# Simulating epidemics
+
+Here we specify the population size $N = 10,000$, 5 initially infectious individuals,
+and simulate 100 days of the epidemic. 
+
+```{r}
+constantsList <- list(N = 10000,
+                      I0 = 5,
+                      R0 = 0,
+                      tau = 100)
+
+
+sirModel <- nimbleModel(SIR_code, 
+                        constants = constantsList)
+
+### determine specifications for simulation
+
+# first, what are the data elements we want
+dataNodes <- c('Istar', 'Rstar')
+# get data nodes at each time point
+(dataNodes <- sirModel$expandNodeNames(dataNodes, returnScalarComponents = TRUE))
+# get all nodes that generate the data nodes
+(parentNodes <- sirModel$getParents(dataNodes, stochOnly = TRUE))
+# due to the temporal structure of the model, data from previous time points 
+#   generates data at subsequent time points, so remove the data nodes from the 
+#   list of parent nodes
+(parentNodes <- parentNodes[-which(parentNodes %in% dataNodes)])
+# not necessary here, but good practice to expand the parent node names for 
+#   generality. Would be important if, e.g., you had a vector of betas beta[1:p]
+(parentNodes <- sirModel$expandNodeNames(parentNodes, returnScalarComponents = TRUE))
+# finally, get all dependencies of the parent nodes to determine everything
+#   that needs to be updated during the simulation process
+nodesToSim <- sirModel$getDependencies(parentNodes, self = FALSE, downstream = T)
+
+
+
+```
+
+
+We can simulate using various values of $\beta$ and $\gamma$ to specify various
+reproductive numbers.
+
+In all simulations the mean infectious period is 5 days.
+
+
+```{r, fig.width = 12, fig.height=12}
+pal <- c('forestgreen', 'red', 'blue')
+
+
+par(mfrow = c(2,2))
+
+# simulation 1
+initsList <- list(beta = 0.8,
+                  gamma = 0.2)
+sirModel$setInits(initsList)
+
+set.seed(1)
+sirModel$simulate(nodesToSim, includeData = TRUE)
+
+plot(sirModel$S, type = 'l', col = pal[1], ylim = c(0, 1.3e4),
+     main = paste0('R0 = ', sirModel$beta / sirModel$gamma), lwd = 2)
+lines(sirModel$I, col = pal[2], lwd = 2)
+lines(sirModel$R, col = pal[3], lwd = 2)
+legend('topright', c('S', 'I', 'R'), col = pal, lwd = 2,
+       bty = 'n', horiz = T)
+
+# simulation 2
+initsList <- list(beta = 0.6,
+                  gamma = 0.2)
+sirModel$setInits(initsList)
+
+set.seed(1)
+sirModel$simulate(nodesToSim, includeData = TRUE)
+
+plot(sirModel$S, type = 'l', col = pal[1], ylim = c(0, 1.3e4),
+     main = paste0('R0 = ', sirModel$beta / sirModel$gamma), lwd = 2)
+lines(sirModel$I, col = pal[2], lwd = 2)
+lines(sirModel$R, col = pal[3], lwd = 2)
+legend('topright', c('S', 'I', 'R'), col = pal, lwd = 2,
+       bty = 'n', horiz = T)
+
+# simulation 3
+initsList <- list(beta = 0.4,
+                  gamma = 0.2)
+sirModel$setInits(initsList)
+
+set.seed(1)
+sirModel$simulate(nodesToSim, includeData = TRUE)
+
+plot(sirModel$S, type = 'l', col = pal[1], ylim = c(0, 1.3e4),
+     main = paste0('R0 = ', sirModel$beta / sirModel$gamma), lwd = 2)
+lines(sirModel$I, col = pal[2], lwd = 2)
+lines(sirModel$R, col = pal[3], lwd = 2)
+legend('topright', c('S', 'I', 'R'), col = pal, lwd = 2,
+       bty = 'n', horiz = T)
+
+# simulation 4
+initsList <- list(beta = 0.2,
+                  gamma = 0.2)
+sirModel$setInits(initsList)
+
+set.seed(1)
+sirModel$simulate(nodesToSim, includeData = TRUE)
+
+plot(sirModel$S, type = 'l', col = pal[1], ylim = c(0, 70),
+     main = paste0('R0 = ', sirModel$beta / sirModel$gamma), lwd = 2)
+lines(sirModel$I, col = pal[2], lwd = 2)
+lines(sirModel$R, col = pal[3], lwd = 2)
+legend('topright', c('S', 'I', 'R'), col = pal, lwd = 2,
+       bty = 'n', horiz = T)
+```
+
+# Epidemics are Stochastic
+
+Here we simulate 100 epidemics from the same parameter values and plot
+the observed incidence curve from each simulation.
+
+```{r}
+initsList <- list(beta = 0.4,
+                  gamma = 0.2)
+sirModel$setInits(initsList)
+
+nSim <- 100
+
+set.seed(1)
+epiCurve <- matrix(NA, nrow = length(sirModel$Istar), ncol = nSim)
+for (i in 1:nSim) {
+    sirModel$simulate(nodesToSim, includeData = TRUE)
+    epiCurve[,i] <- sirModel$Istar
+}
+
+plot(epiCurve[,1], type = 'l', col = adjustcolor('black', alpha = 0.3),
+     ylim = c(0, 500))
+for (i in 2:nSim) {
+    lines(epiCurve[,i], col = adjustcolor('black', alpha = 0.3))
+}
+
+```
+
+# Model fitting to simulated data
+
+Simulate data, then use it to fit the model.
+
+```{r}
+initsList <- list(beta = 0.6,
+                  gamma = 0.2)
+sirModel$setInits(initsList)
+
+set.seed(1)
+sirModel$simulate(nodesToSim, includeData = TRUE)
+
+trueIstar <- sirModel$Istar
+trueRstar <- sirModel$Rstar
+
+endTime <- max(which(trueIstar > 0)) + 10
+trueIstar <- trueIstar[1:endTime]
+trueRstar <- trueRstar[1:endTime]
+
+plot(trueIstar, type = 'l')
+lines(trueRstar, col = 'red')
+legend('topright', c('incidence', 'removals'), col = c('black', 'red'), lwd = 1)
+```
+
+
+# Model Specifications
+
+Before fitting the model, we need to determine a reasonable prior for $\gamma$.
+The true value corresponds to a mean infectious period of 5 days, so we choose a
+prior that puts 90% probability on the mean infectious period between 4 and 6 days
+and is centered on 5 days.
+
+```{r}
+bb <- 348
+aa <- 0.2 * bb
+pgamma(1/4, aa, bb) - pgamma(1/6, aa, bb)
+curve(dgamma(x, aa, bb))
+```
+
+
+```{r}
+dataList <- list(Istar = trueIstar,
+                 Rstar = trueRstar)
+
+constantsList <- list(N = 10000,
+                      I0 = 5,
+                      R0 = 0,
+                      tau = length(dataList$Istar),
+                      aa = aa,
+                      bb = bb) 
+
+set.seed(2)
+initsList <- list(beta = runif(1, 0, 1),
+                  gamma = rgamma(1, aa, bb))
+
+
+sirModelFit <- nimbleModel(SIR_code, 
+                           constants = constantsList,
+                           data = dataList,
+                           inits = initsList)
+
+
+
+```
+
+NIMBLE automatically calculates S, I, and R from Istar and Rstar, so these do 
+not need to be inputs to the model
+
+```{r}
+with(sirModelFit, cbind(S, Istar, I, Rstar, R))[1:20,]
+```
+
+
+
+# Use Default Configurations and Obtain Samples
+
+Plotted with burn-in included here
+
+```{r}
+myConfig <- configureMCMC(sirModelFit)
+myMCMC <- buildMCMC(myConfig)
+
+system.time({
+    compiled <- compileNimble(sirModelFit, myMCMC) 
+    samples <- runMCMC(compiled$myMCMC, niter = 50000, setSeed = 3)
+})
+
+head(samples)
+
+par(mfrow = c(1,2))
+plot(samples[,'beta'], type = 'l')
+abline(h = 0.6, col = 'red')
+plot(samples[,'gamma'], type = 'l')
+abline(h = 0.2, col = 'red')
+
+```
+
+
