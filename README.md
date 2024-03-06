@@ -7,7 +7,7 @@ Presented and created by Dr. Rob Deardon and Dr. Caitlin Ward
 ## Tentative Schedule
 
 Morning (8:00 - 12:00pm)  
-Part I: Introduction to Deterministic Epidemics Models and Bayesian Inference
+Part I: Introduction to Deterministic Epidemics Models and Bayesian Inference  
 Part II: Population-Averaged Models  
 
 Afternoon (1:00pm - 5:00pm)  
